@@ -1,83 +1,75 @@
 import socket
-import zlib  # Usado para calcular o checksum
+import zlib
+import time
 
-BUFFER_SIZE = 1024
-simulation_mode = 0  # 0 = Normal, 1 = Perder pacotes, 2 = Corromper pacotes
-
-def set_simulation_mode():
-    """Define o modo de simulação para o servidor."""
-    global simulation_mode
-    while True:
-        try:
-            mode = int(input("Escolha o modo de simulação:\n0 = Normal\n1 = Perder pacotes\n2 = Corromper pacotes\n-> "))
-            if mode in [0, 1, 2]:
-                simulation_mode = mode
-                break
-            else:
-                print("Modo inválido. Por favor, escolha 0, 1 ou 2.")
-        except ValueError:
-            print("Entrada inválida. Por favor, insira um número.")
-
-def simulate_network(packet):
-    """Simula a perda e corrupção de pacotes baseado no modo de simulação."""
-    if simulation_mode == 1:
-        print("Pacote perdido.")
-        return None  # Simula perda de pacote
-    elif simulation_mode == 2:
-        print("Pacote corrompido.")
-        return packet + "corrupt"  # Simula corrupção de pacote
-    return packet  # Pacote recebido corretamente
-
-def verify_checksum(data, received_checksum):
-    """Verifica se o checksum calculado corresponde ao checksum recebido."""
-    calculated_checksum = zlib.crc32(data.encode())
-    return calculated_checksum == received_checksum
+def checksum(data):
+    return zlib.crc32(data.encode())
 
 def main():
-    """Configura o servidor para receber dados de jogo e enviar ACKs."""
-    global simulation_mode
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server_socket.bind(('0.0.0.0', 4444))  # Escuta em todas as interfaces de rede
-    print("Servidor esperando por dados de jogo...")
-
-    set_simulation_mode()
-
-    print(f"Modo de simulação definido como: {simulation_mode}")
+    server_socket.bind(('localhost', 12345))
+    
+    print("Servidor: Aguardando as escolhas do cliente...")
 
     while True:
-        data, addr = server_socket.recvfrom(BUFFER_SIZE)
-        if not data:
-            continue  # Ignora pacotes vazios
-
-        # Envia a configuração de simulação para o cliente
-        server_socket.sendto(f"START:{simulation_mode}".encode(), addr)
-
-        data = simulate_network(data.decode())
-
-        if data is None:
-            print("Pacote perdido, esperando o próximo pacote...")
-            continue  # Ignora o pacote perdido
-
-        if "corrupt" in data:
-            print("Pacote corrompido")
-            server_socket.sendto("RETRY".encode(), addr)  # Solicita reenvio do pacote
-            continue  # Ignora o pacote corrompido
-
-        # Extrai dados e checksum do pacote
         try:
-            game_data, received_checksum = data.rsplit(":", 1)
-            received_checksum = int(received_checksum)
+            print("|------------------------------------------------------------------------------------------|\n")
+            # Recebe os modos do cliente
+            modes, client_address = server_socket.recvfrom(1024)
+            client_mode, server_mode = modes.decode().split(',')
+            print(f"Servidor: Modos recebidos - ENVIAR (cliente): '{client_mode}', RECEBER (servidor): '{server_mode}'.")
+            
+            # Envia confirmação ao cliente
+            server_socket.sendto("ACK".encode(), client_address)
+            print("Servidor: Sincronizado com o cliente. Pronto para receber dados...\n")
+        
+            while True:
+                try:
+                    # Recebe o pacote do cliente
+                    packet, client_address = server_socket.recvfrom(1024)
+                    packet = packet.decode()
+                    print(f"Servidor: Pacote recebido: {packet}")
 
-            if verify_checksum(game_data, received_checksum):
-                print(f"Dados de jogo recebidos com sucesso: {game_data} de {addr}")
-                server_socket.sendto("ACK".encode(), addr)  # Confirma o recebimento do pacote
-            else:
-                print("Checksum inválido. Pacote corrompido.")
-                server_socket.sendto("RETRY".encode(), addr)  # Solicita reenvio do pacote
+                    # Tenta separar o pacote e calcular o checksum
+                    try:
+                        data, received_checksum_str = packet.rsplit(',', 1)
+                        received_checksum = int(received_checksum_str.strip())
+                        calculated_checksum = checksum(data)
+                    except ValueError as e:
+                        print(f"Servidor: Erro ao processar o pacote - {e}")
+                        break
 
-        except ValueError:
-            print("Erro ao processar o pacote. Pacote corrompido ou mal formado.")
-            server_socket.sendto("RETRY".encode(), addr)  # Solicita reenvio do pacote
+                    # Verifica se o checksum recebido coincide com o calculado
+                    if calculated_checksum == received_checksum:
+                        if client_mode == 'perder':
+                            response_data = "Pacote perdido."
+                        else:
+                            response_data = "Pacote recebido corretamente"
+                    else:
+                        response_data = "Pacote corrompido"
+                    
+                    response_checksum = checksum(response_data)
 
-if __name__ == "__main__":
+                    if server_mode == 'corromper':  # Corromper
+                        response_checksum += 1  # Corrompe o checksum
+                        print("Servidor: Resposta será corrompida antes do envio.")
+                    elif server_mode == 'perder':  # Perder
+                        print("Servidor: Simulando perda de resposta...")
+                        time.sleep(2)  # Simula o tempo de perda
+                        print("Servidor: Tempo de resposta excedido. Resposta não enviada.\n")
+                        break  # Volta ao início para nova espera
+
+                    response_packet = f'{response_data},{response_checksum}'
+                    server_socket.sendto(response_packet.encode(), client_address)
+                    print(f"Servidor: Resposta enviada: {response_packet}\n")
+                    break
+
+                except socket.timeout:
+                    print("Servidor: Tempo de espera excedido. Nenhum pacote recebido.\n")
+                    break
+        
+        except Exception as e:
+            print(f"Servidor: Erro inesperado: {e}\n")
+
+if __name__ == '__main__':
     main()
